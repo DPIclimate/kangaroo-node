@@ -9,7 +9,7 @@
 
 #define MAJOR 1
 #define MINOR 0
-#define REV   0
+#define REV   1
 
 typedef union {
     float value;
@@ -60,8 +60,7 @@ constexpr float AD_VOLTS = 3.3f;
 constexpr int AD_BIT_SIZE = 10;
 static float ad_step = 0;
 
-static osjob_t sendjob;
-void do_send(osjob_t* j);
+void do_send(void);
 void lmic_request_network_time_cb(void * pUserData, int flagSuccess);
 void sensors(void);
 void doButtonProcessing(void);
@@ -136,6 +135,10 @@ static bool joinFailed = false;
 // when a gateway is down would waste a lot of power.
 static uint8_t joinCooldown = 0;
 
+static bool doSendInfo = false;
+
+static bool inLoRaTxn = false;
+
 static bool doSendAndMeasure = false;
 
 void onEvent (ev_t ev) {
@@ -155,6 +158,7 @@ void onEvent (ev_t ev) {
             log_msg("EV_JOINED");
             LMIC_setLinkCheckMode(0);
             joinCooldown = 0;
+            doSendInfo = true;
             doSendAndMeasure = true;
             break;
 
@@ -170,17 +174,38 @@ void onEvent (ev_t ev) {
 
             digitalWrite(LED_BUILTIN, LOW);
             log_msg("EV_TXCOMPLETE (includes waiting for RX windows)");
+            inLoRaTxn = false;
             break;
 
         case EV_TXSTART:
             digitalWrite(LED_BUILTIN, HIGH);
             log_msg("EV_TXSTART");
+            inLoRaTxn = true;
             wdt_enable();
             break;
 
         case EV_JOIN_TXCOMPLETE:
             log_msg("EV_JOIN_TXCOMPLETE: no JoinAccept");
             break;
+    }
+}
+
+void sendInfoUplink(void) {
+    log_msg("Sending info uplink");
+
+    // "Ka" is the Kangaroo board ID.
+    payloadBuffer[0] = 'K';
+    payloadBuffer[1] = 'a';
+
+    payloadBuffer[2] = MAJOR;
+    payloadBuffer[3] = MINOR;
+    payloadBuffer[4] = REV;
+
+    LMIC_setTxData2(2, payloadBuffer, 5, 0);
+
+    inLoRaTxn = true;
+    while (inLoRaTxn) {
+        os_runloop_once();
     }
 }
 
@@ -376,7 +401,7 @@ void sensors(void) {
             int strLen = 0;
             char windDirStr[16];
             for (size_t i = 0; i < dirReadCount; i++) {
-                strLen = snprintf(windDirStr, sizeof(windDirStr), ",%u", rawDirArray[i]);
+                strLen = snprintf(windDirStr, sizeof(windDirStr), ",%lu", rawDirArray[i]);
                 strncat(sdCardMsg, windDirStr, (SD_CARD_MAX - lineLen));
                 lineLen = lineLen + strLen;
             }
@@ -447,9 +472,9 @@ static int32_t delta_seconds = -1;
  * are meant to happen at fixed times such as on the hour.
  */
 void set_delta_alarm() {
-    int32_t ss = (int32_t)rtc.getSeconds();
-    int32_t mm = (int32_t)rtc.getMinutes();
-    int32_t hh = (int32_t)rtc.getHours();
+    int32_t ss = rtc.getSeconds();
+    int32_t mm = rtc.getMinutes();
+    int32_t hh = rtc.getHours();
 
     // Sanity check.
     if (delta_seconds < 1) {
@@ -596,6 +621,10 @@ void setup() {
     // Disable NVM power reduction during standby, errata 1.5.8.
     NVMCTRL->CTRLB.bit.SLEEPPRM = 3;
 
+    // Fix for errata 12291 and also in case we're using too much current
+    // in standby mode.
+    SYSCTRL->VREG.bit.RUNSTDBY = 1;
+
     ad_step = AD_VOLTS / pow(2.0f, AD_BIT_SIZE);
 
     randomSeed(davis.getDirectionRaw());
@@ -605,6 +634,27 @@ void setup() {
     os_init();
     LMIC_reset();
     LMIC_startJoining();
+}
+
+void main_standby_sleep(void) {
+#ifdef USE_SERIAL
+    serial.flush();
+#endif
+
+    // Lots of forum posts explaining why disabling IRQs before standby is a good idea,
+    // and it somehow still allows the MCU to be woken with an interrupt.
+    __disable_irq();
+
+    // Yet another reason a SAMD21 might not come out of standby. Something about
+    // the systick interrupt happening at an inconvenient time.
+    // See https://www.avrfreaks.net/forum/samd21-samd21e16b-sporadically-locks-and-does-not-wake-standby-sleep-mode
+    SysTick->CTRL &= ~SysTick_CTRL_TICKINT_Msk;
+
+    rtc.standbyMode();
+
+    SysTick->CTRL |= SysTick_CTRL_TICKINT_Msk;
+
+    __enable_irq();
 }
 
 static bool printLMICBusyMsg = true;
@@ -626,6 +676,11 @@ void loop() {
     }
 
     os_runloop_once();
+
+    if (doSendInfo) {
+        sendInfoUplink();
+        doSendInfo = false;
+    }
 
     if (doSendAndMeasure) {
         doSendAndMeasure = false;
@@ -658,8 +713,6 @@ void loop() {
         // although it only seems to be associated with class B devices.
         // As long as the joining and TX flags are clear, LMIC is basically in a waiting state.
         if (lmicOpmode == (OP_POLL + OP_RNDTX)) {
-            log_msg("Checking for near future internal LMIC operations");
-
             bit_t valid = 0;
             ostime_t now = os_getTime();
             ostime_t deadline = os_getNextDeadline(&valid);
@@ -670,8 +723,10 @@ void loop() {
                     log_msg("OP_POLL delta from now: %ld, %ld s", delta_osticks, delta_seconds);
                     delta_seconds = delta_seconds - 2;
                     set_delta_alarm();
-                    rtc.standbyMode();
+                    log_msg("Sleeping - relative alarm");
+                    main_standby_sleep();
                     rtc.disableAlarm();
+                    log_msg("Awake");
                 }
             }
         }
@@ -692,19 +747,13 @@ void loop() {
 
     set_next_absolute_alarm();
 
-    log_msg("Sleeping");
-#ifdef USE_SERIAL
-    serial.flush();
-#endif
-
     skipReadAndSend = false;
     buttonWake = false;
     attachInterrupt(digitalPinToInterrupt(PUSH_BUTTON), buttonISR, RISING);
 
-    rtc.standbyMode();
-
+    log_msg("Sleeping - absolute alarm");
+    main_standby_sleep();
     rtc.disableAlarm();
-
     log_msg("Awake");
 
     // Wrap the button processing with the WDT because I've seen it hang once.
@@ -734,7 +783,7 @@ void doButtonProcessing(void) {
     bool ledOn = true;
     digitalWrite(LED_BUILTIN, ledOn);
 
-    int period = 500;
+    uint32_t period = 500;
     unsigned long time_now = 0;
     uint16_t ticks = 0;
     while (ticks < 5000) {

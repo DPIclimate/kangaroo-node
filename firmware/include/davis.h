@@ -40,9 +40,9 @@ public:
         return wind_count;
     }
 
-    float getSpeedMph(const uint32_t count, const uint32_t ms) {
+    float getSpeedMph(const uint32_t count, const uint32_t s) {
         // convert to mp/h using the formula V=P(2.25/T)
-        return count * 2.25 / (ms / 1000);
+        return count * 2.25 / s;
     }
 
     float getSpeedKph(const uint32_t count, const uint32_t ms) {

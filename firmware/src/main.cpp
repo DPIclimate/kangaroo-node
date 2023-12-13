@@ -2,6 +2,7 @@
 #include "davis.h"
 #include <lmic.h>
 #include "node_config.h"
+#include "evtsys.h"
 
 #include <RTCZero.h>
 
@@ -20,6 +21,10 @@ Davis davis(WIND_DIR_PIN, WIND_SPEED_PIN);
 RTCZero rtc;
 
 static bool joined = false;
+
+static bool first_run = true;
+
+static int32_t delta_seconds = 300;
 
 uint8_t payloadBuffer[18];
 
@@ -147,12 +152,11 @@ void do_send(void) {
 }
 
 void sensors(void) {
-    static constexpr uint32_t speedDelayInMs = 15000;
     static constexpr uint32_t dirReadDelayInMs = 500;
-    static constexpr size_t dirReadCount = speedDelayInMs / dirReadDelayInMs;
+    static constexpr size_t dirReadCount = 15000 / dirReadDelayInMs;
 
     log_msg("Measuring wind speed & direction");
-    davis.startSpeedMeasurement();
+    //davis.startSpeedMeasurement();
 
     /*
      * https://math.stackexchange.com/questions/44621/calculate-average-wind-direction
@@ -192,7 +196,7 @@ void sensors(void) {
         delay(dirReadDelayInMs);
     }
 
-    uint32_t windCount = davis.stopSpeedMeasurement();
+    //uint32_t windCount = davis.stopSpeedMeasurement();
 
     //float meanVx = sumVx / dirReadCount;
     //float meanVy = sumVy / dirReadCount;
@@ -215,12 +219,21 @@ void sensors(void) {
     stdDev.value = sqrtf(stdSum / (dirReadCount - 1));  // std dev in radians
     stdDev.value = (stdDev.value * 180.0f) / PI;  // convert std dev to degrees
 
-    log_msg("Avg wind direction over %lu s = %f (%d), std dev: %.2f", speedDelayInMs/1000, avgDirDeg, avgDeg, stdDev.value);
+    log_msg("Avg wind direction over %lu s = %f (%d), std dev: %.2f", dirReadCount * dirReadDelayInMs / 1000, avgDirDeg, avgDeg, stdDev.value);
+
+    uint32_t P = 0xFFFFFFFF;
+    if ( ! first_run) {
+        P = TC3->COUNT32.COUNT.reg;
+    }
+
+    TC3->COUNT32.COUNT.reg = 0;
+
+    log_msg("Wind pulse count(P): %lu", P);
 
     FLOAT windKph;
-    windKph.value = davis.getSpeedKph(windCount, speedDelayInMs);
+    windKph.value = davis.getSpeedKph(P, delta_seconds);
 
-    log_msg("Wind speed: count = %d, kph = %.2f", windCount, windKph.value);
+    log_msg("Wind speed: count = %lu, kph = %.2f", P, windKph.value);
 
     uint32_t batteryReading = analogRead(VBATT);
     log_msg("measuredvbat as read: %lu", batteryReading);
@@ -242,21 +255,30 @@ void sensors(void) {
     payloadBuffer[i++] = stdDev.bytes[1];
     payloadBuffer[i++] = stdDev.bytes[0];
 
-    payloadBuffer[i++] = (windCount >>  8) & 0xff;
-    payloadBuffer[i++] =  windCount        & 0xff;
+    // TODO: Need to add 2 more bytes to handle uint_32 value.
+    payloadBuffer[i++] = (P >> 8) & 0xff;
+    payloadBuffer[i++] = P & 0xff;
 
-    payloadBuffer[i++] = windKph.bytes[3];
-    payloadBuffer[i++] = windKph.bytes[2];
-    payloadBuffer[i++] = windKph.bytes[1];
-    payloadBuffer[i++] = windKph.bytes[0];
+    if ( ! first_run) {
+      payloadBuffer[i++] = windKph.bytes[3];
+      payloadBuffer[i++] = windKph.bytes[2];
+      payloadBuffer[i++] = windKph.bytes[1];
+      payloadBuffer[i++] = windKph.bytes[0];
+    } else {
+      payloadBuffer[i++] = 0xff;
+      payloadBuffer[i++] = 0xff;
+      payloadBuffer[i++] = 0xff;
+      payloadBuffer[i++] = 0xff;
+    }
+
 
     // The decoder is expecting the battery voltage * 100 to be encoded
     // in a uint8_t. This encoding only handles voltages up to about 3.6
     // before the uint8_t overflows.
     payloadBuffer[i++] = (uint8_t)(measuredvbat) - 127;
-}
 
-static int32_t delta_seconds = 878; // 900 - 22 seconds for the measure send cycle.
+    first_run = false;
+}
 
 /*
  * This function is used to set the alarm to a relative time in the future, such as when
@@ -268,12 +290,14 @@ void set_delta_alarm() {
     int32_t mm = rtc.getMinutes();
     int32_t hh = rtc.getHours();
 
+    // Adjust the sleep time to account for the 15 second direction measurement and the 6 second uplink/downlink cycle.
+    int32_t adjusted_delta = delta_seconds - 21;
     // Sanity check.
-    if (delta_seconds < 1) {
-        delta_seconds = 1;
+    if (adjusted_delta < 1) {
+      adjusted_delta = 1;
     }
 
-    int32_t delta = delta_seconds;
+    int32_t delta = adjusted_delta;
     int32_t hh_delta = delta / 3600; delta -= (hh_delta * 3600);
     // Will always be less than 1 hour.
     int32_t mm_delta = delta / 60; delta -= (mm_delta * 60);
@@ -371,6 +395,11 @@ void setup() {
 
       os_runloop_once();
     }
+
+    setup_GCLK();
+    setup_EIC();
+    setup_TC();
+    setup_EVSYS();
 }
 
 void main_standby_sleep(void) {

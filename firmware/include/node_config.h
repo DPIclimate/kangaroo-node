@@ -6,10 +6,7 @@
 
 #define PUSH_BUTTON      5
 #define LORA_CS_PIN      8
-// FIXME: Pin 9, aka A7, is supposed to be used to read the battery voltage on a Feather.
-// FIXME: The board needs to be revised to use a different pin to control the voltage
-// FIXME: booster. See issue #4.
-#define SDI12_POWER      9
+#define SDI12_POWER     14
 #define SDI12_DATA_PIN  10
 #define SDCARD_CS_PIN   11
 #define WIND_SPEED_PIN  12

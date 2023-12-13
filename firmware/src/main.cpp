@@ -121,6 +121,22 @@ void onEvent (ev_t ev) {
         case EV_JOIN_TXCOMPLETE:
             log_msg("EV_JOIN_TXCOMPLETE: no JoinAccept");
             break;
+
+      case EV_SCAN_TIMEOUT:
+      case EV_BEACON_FOUND:
+      case EV_BEACON_MISSED:
+      case EV_BEACON_TRACKED:
+      case EV_RFU1:
+      case EV_REJOIN_FAILED:
+      case EV_LOST_TSYNC:
+      case EV_RESET:
+      case EV_RXCOMPLETE:
+      case EV_LINK_DEAD:
+      case EV_LINK_ALIVE:
+      case EV_SCAN_FOUND:
+      case EV_TXCANCELED:
+      case EV_RXSTART:
+        break;
     }
 }
 
@@ -346,6 +362,15 @@ void setup() {
     os_init();
     LMIC_reset();
     LMIC_startJoining();
+
+    while ( ! joined) {
+      if (LMIC.opmode != lmicOpmode) {
+        lmicOpmode = LMIC.opmode;
+        log_opmode();
+      }
+
+      os_runloop_once();
+    }
 }
 
 void main_standby_sleep(void) {
@@ -371,15 +396,6 @@ void main_standby_sleep(void) {
 }
 
 void loop() {
-    while ( ! joined) {
-      if (LMIC.opmode != lmicOpmode) {
-        lmicOpmode = LMIC.opmode;
-        log_opmode();
-      }
-
-      os_runloop_once();
-    }
-
     do_send();
     while (! LMIC_queryTxReady()) {
       os_runloop_once();

@@ -8,7 +8,7 @@
 
 #define MAJOR 1
 #define MINOR 0
-#define REV   1
+#define REV   2
 
 typedef union {
     float value;
@@ -24,7 +24,7 @@ static bool joined = false;
 
 static bool first_run = true;
 
-static int32_t delta_seconds = 300;
+static int32_t delta_seconds = 900;
 
 uint8_t payloadBuffer[18];
 
@@ -255,6 +255,10 @@ void sensors(void) {
     payloadBuffer[i++] = stdDev.bytes[1];
     payloadBuffer[i++] = stdDev.bytes[0];
 
+    // Send -1 for wind count/speed in first message after reboot.
+    // The raw count in the firmware is a uint32_t from the count register but the TTN decoder is looking for a
+    // int16_t, so we can send a -1.
+
     // TODO: Need to add 2 more bytes to handle uint_32 value.
     payloadBuffer[i++] = (P >> 8) & 0xff;
     payloadBuffer[i++] = P & 0xff;
@@ -265,12 +269,11 @@ void sensors(void) {
       payloadBuffer[i++] = windKph.bytes[1];
       payloadBuffer[i++] = windKph.bytes[0];
     } else {
-      payloadBuffer[i++] = 0xff;
-      payloadBuffer[i++] = 0xff;
-      payloadBuffer[i++] = 0xff;
-      payloadBuffer[i++] = 0xff;
+      payloadBuffer[i++] = 0xbf;
+      payloadBuffer[i++] = 0x80;
+      payloadBuffer[i++] = 0x00;
+      payloadBuffer[i++] = 0x00;
     }
-
 
     // The decoder is expecting the battery voltage * 100 to be encoded
     // in a uint8_t. This encoding only handles voltages up to about 3.6
@@ -290,8 +293,10 @@ void set_delta_alarm() {
     int32_t mm = rtc.getMinutes();
     int32_t hh = rtc.getHours();
 
-    // Adjust the sleep time to account for the 15 second direction measurement and the 6 second uplink/downlink cycle.
-    int32_t adjusted_delta = delta_seconds - 21;
+    // Adjust the sleep time to account for the 15 second direction measurement and the 6 second uplink/downlink cycle,
+    // then -1 because the feather seems to wake up a second late.
+    int32_t adjusted_delta = delta_seconds - 22;
+
     // Sanity check.
     if (adjusted_delta < 1) {
       adjusted_delta = 1;
